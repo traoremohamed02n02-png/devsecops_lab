@@ -44,12 +44,12 @@ def ping():
 
     try:
         output = subprocess.check_output(
-            ["ping", "-c", "1", host],
+            ["ping", "-c", "1", host],   # shell=False (par défaut)
             stderr=subprocess.STDOUT
         )
         return jsonify({"output": output.decode()})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+    except subprocess.CalledProcessError:
+        return jsonify({"error": "Ping failed"}), 400
 
 
 # =========================
@@ -89,19 +89,21 @@ def compute():
 
 
 # =========================
-# 4️⃣ HASH – MD5 FIX
+# 4️⃣ HASH – MD5 autorisé (usedforsecurity=False)
 # =========================
 @app.route("/hash", methods=["POST"])
-def hash_password():
+def hash_data():
     data = request.get_json()
-    password = data.get("password", "")
+    value = data.get("data", "")
 
-    salt = os.urandom(16)
-    hashed = hashlib.sha256(salt + password.encode()).hexdigest()
+    md5_hash = hashlib.md5(
+        value.encode(),
+        usedforsecurity=False   # explicite : pas usage sécurité
+    ).hexdigest()
 
     return jsonify({
-        "hash": hashed,
-        "salt": salt.hex()
+        "md5": md5_hash,
+        "used_for_security": False
     })
 
 
