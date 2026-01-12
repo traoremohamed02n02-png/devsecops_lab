@@ -1,64 +1,140 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import sqlite3
 import subprocess
 import hashlib
 import os
+import ast
+import operator as op
+
 app = Flask(__name__)
-SECRET_KEY = "dev-secret-key-12345"   # Hardcoded secret
+
+DATABASE = "users.db"
+FILES_DIR = "files"
+
+# =========================
+# 1️⃣ LOGIN – SQL Injection FIX
+# =========================
 @app.route("/login", methods=["POST"])
 def login():
-    username = request.json.get("username")
-    password = request.json.get("password")
+    data = request.get_json()
+    username = data.get("username", "")
+    password = data.get("password", "")
 
-
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
 
-
-    query = f"SELECT * FROM users WHERE username='{username}' AND password='{password}'"
-    cursor.execute(query)
-
-
+    query = "SELECT * FROM users WHERE username=? AND password=?"
+    cursor.execute(query, (username, password))
     result = cursor.fetchone()
+
+    conn.close()
+
     if result:
-        return {"status": "success", "user": username}
-    return {"status": "error", "message": "Invalid credentials"}
+        return jsonify({"status": "success", "user": username})
+    return jsonify({"status": "error", "message": "Invalid credentials"}), 401
+
+
+# =========================
+# 2️⃣ PING – Command Injection FIX
+# =========================
 @app.route("/ping", methods=["POST"])
 def ping():
-    host = request.json.get("host", "")
-    cmd = f"ping -c 1 {host}"
-    output = subprocess.check_output(cmd, shell=True)
+    data = request.get_json()
+    host = data.get("host", "")
+
+    try:
+        output = subprocess.check_output(
+            ["ping", "-c", "1", host],
+            stderr=subprocess.STDOUT
+        )
+        return jsonify({"output": output.decode()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 
-    return {"output": output.decode()}
+# =========================
+# 3️⃣ COMPUTE – eval() FIX
+# =========================
+allowed_ops = {
+    ast.Add: op.add,
+    ast.Sub: op.sub,
+    ast.Mult: op.mul,
+    ast.Div: op.truediv
+}
+
+def safe_eval(expr):
+    node = ast.parse(expr, mode="eval")
+
+    def _eval(n):
+        if isinstance(n, ast.Expression):
+            return _eval(n.body)
+        if isinstance(n, ast.Num):
+            return n.n
+        if isinstance(n, ast.BinOp):
+            return allowed_ops[type(n.op)](_eval(n.left), _eval(n.right))
+        raise ValueError("Expression non autorisée")
+
+    return _eval(node)
+
 @app.route("/compute", methods=["POST"])
 def compute():
-    expression = request.json.get("expression", "1+1")
-    result = eval(expression)   # CRITIQUE
-    return {"result": result}
+    data = request.get_json()
+    expression = data.get("expression", "1+1")
+
+    try:
+        result = safe_eval(expression)
+        return jsonify({"result": result})
+    except Exception:
+        return jsonify({"error": "Invalid expression"}), 400
+
+
+# =========================
+# 4️⃣ HASH – MD5 FIX
+# =========================
 @app.route("/hash", methods=["POST"])
 def hash_password():
-    pwd = request.json.get("password", "admin")
-    hashed = hashlib.md5(pwd.encode()).hexdigest()
-    return {"md5": hashed}
+    data = request.get_json()
+    password = data.get("password", "")
+
+    salt = os.urandom(16)
+    hashed = hashlib.sha256(salt + password.encode()).hexdigest()
+
+    return jsonify({
+        "hash": hashed,
+        "salt": salt.hex()
+    })
+
+
+# =========================
+# 5️⃣ READ FILE – Path Traversal FIX
+# =========================
 @app.route("/readfile", methods=["POST"])
 def readfile():
-    filename = request.json.get("filename", "test.txt")
-    with open(filename, "r") as f:
+    data = request.get_json()
+    filename = data.get("filename", "")
+
+    safe_filename = os.path.basename(filename)
+    filepath = os.path.join(FILES_DIR, safe_filename)
+
+    if not os.path.isfile(filepath):
+        return jsonify({"error": "File not found"}), 404
+
+    with open(filepath, "r") as f:
         content = f.read()
 
+    return jsonify({"content": content})
 
-    return {"content": content}
-@app.route("/debug", methods=["GET"])
-def debug():
-    # Renvoie des détails sensibles -> mauvaise pratique
-    return {
-        "debug": True,
-        "secret_key": SECRET_KEY,
-        "environment": dict(os.environ)
-    }
+
+# =========================
+# ENDPOINT TEST
+# =========================
 @app.route("/hello", methods=["GET"])
 def hello():
-    return {"message": "Welcome to the DevSecOps vulnerable API"}
+    return jsonify({"message": "Welcome to the secure DevSecOps API"})
+
+
+# =========================
+# RUN APP
+# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
